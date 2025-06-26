@@ -1,0 +1,462 @@
+---
+title: "Cluster Analysis"
+author: "Cheeson Lau"
+date: "2025-02-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(factoextra)
+library(cluster)
+```
+
+# Introduction
+
+This document intends to explore 10 year trend of energy product in trading hubs. It is specifically only going to do cluster analysis on the energy trading price in Mid-C and COB. I will not filter out any outliers for now since I want to see if they share any similarities such as unusual temperature or precipitation.
+
+# Dataset
+
+I am using EQR data files for all companies from FERC website from 2014 Q1 - 2024 Q1 in this study. Note that this time I did not divide the data into hourly and daily dataset.
+
+EQR data: https://www.ferc.gov/power-sales-and-markets/electric-quarterly-reports-eqr, O:\POOL\PRIVATE\RISKMGMT\EQR Reporting\EQR Study
+
+## Import EQR Dataset
+
+```{r}
+import_energy <- function() {
+  
+  # I used fread() because it is faster than read.csv() and read_csv()
+  energy_data <- data.table::fread("Final_Data_Files/final_energy_transactions_no_breakdown.csv")
+  
+  # Convert datatype of transaction_begin_date, transaction_end_date, and trade_date to POSIXct or date from char or int
+  energy_data[, transaction_begin_date := as.POSIXct(transaction_begin_date, format="%Y/%m/%d %H:%M")]
+  energy_data[, transaction_end_date := as.POSIXct(transaction_end_date, format="%Y/%m/%d %H:%M")]
+  energy_data[, trade_date := lubridate::ymd(trade_date)]
+  
+  # Fixed unmatching cases in the increment_name column
+  # H and h should be one group, D and d should be one group, so are M and m
+  energy_data[, increment_name := gsub("^d$", "D", increment_name)]
+  energy_data[, increment_name := gsub("^h$", "H", increment_name)]
+  energy_data[, increment_name := gsub("^m$", "M", increment_name)]
+  
+  # Fixed unmatching cases in the point_of_delivery_specific_location column
+  # There should only be two acceptable hubs: Mid-C and COB
+  energy_data <- energy_data %>%
+  mutate(point_of_delivery_specific_location = str_to_upper(point_of_delivery_specific_location))
+
+  # Assign to the global environment
+  assign("energy_data", energy_data, pos = .GlobalEnv)
+}
+```
+
+```{r}
+# 5453260 obs
+import_energy()
+```
+
+There are also two other datasets which contains the input variables for cluster analysis. I put all input variables into one of the two datasets: the weather dataset, and the non-weather dataset. The weather dataset contains weather data, and the non-weather dataset contains gas price, oil production, cpi data, etc. This is what each variable name means:
+
+## Weather Data Meaning
+
+precipitation: Precipitation (Inch)
+max_temp: Highest hourly temperature (Fahrenheit)
+min_temp: Lowest hourly temperature (Fahrenheit)
+avg_temp: Average hourly temperature (Fahrenheit)
+avg_wind_speed: Average daily wind speed (Miles per hour)
+max_2min_wind_speed: Fastest 2-minute wind speed (Miles per hour)
+max_5s_wind_speed: Fastest 5-second wind speed (Miles per hour)
+none: Percentage of area in the region without drought
+abnormally_dry: Percentage of area in the region that is considered abnormally dry (D0)
+moderate_drought: Percentage of area in the region that is considered having a moderate drought (D1)
+severe_drought: Percentage of area in the region that is considered having a severe drought (D2)
+extreme_drought: Percentage of area in the region that is considered having an extreme drought (D3)
+exceptional_drought: Percentage of area in the region that is considered having an exceptional drought (D4)
+
+If you want to learn more about the drought levels, check out https://www.drought.gov/impacts#impacts-table.
+
+For whatever reason, the weather data on
+
+- 04/24/2016 in COB
+- 05/31/2018 in COB
+- 05/31/2022 in Mid-C
+
+were missing. I dealt with it by taking the 7 day average for the input variables. All other missing data in these two dataset were already dealt with using Excel before importing in RStudio. I usually take averages to deal with missing data (about 0.5-2% of data might be missing).
+
+## Non Weather Data Meaning
+
+gas_price: https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=EER_EPMRU_PF4_Y35NY_DPG&f=W, this is the Weekly New York Harbor Conventional Gasoline Regular Spot Price FOB. Dollars per Gallon.
+oil_price: https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=RWTC&f=W, this is the Weekly Cushing, OK WTI Spot Price FOB. Dollars per Barrel.
+crude_net_import: https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=WCRNTUS2&f=W, this is the Weekly U.S. Net Imports of Crude Oil. Thousand Barrels per Day.
+oil_production: https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=MCRFPUS2&f=M, this is the U.S. Field Production of Crude Oil. Thousand Barrels per Day.
+sticky_core_cpi: https://fred.stlouisfed.org/series/CORESTICKM158SFRBATL, this is the Sticky Price Consumer Price Index less Food and Energy. Percent Change at Annual Rate, Seasonally Adjusted. This refers to components of the CPI that change price relatively infrequently.
+flexible_core_cpi: https://fred.stlouisfed.org/series/COREFLEXCPIM158SFRBATL, this is the Flexible Price Consumer Price Index less Food and Energy. Percent Change at Annual Rate, Seasonally Adjusted. This refers to components of the CPI that change price relatively frequently.
+
+Now we can import the weather dataset and non-weather dataset.
+
+## Import Other Dataset
+
+```{r}
+weather_data <- read.csv("Weather_Data/2HUB_weather.csv")
+non_weather_data <- read.csv("Non_Weather_Data/gas_oil_cpi.csv")
+```
+
+## Transform Energy Dataset
+
+```{r}
+# Preprocessing Energy Dataset
+energy_data <- energy_data %>%
+  filter(rate_units == "$/MWH", !is.na(price), !is.na(transaction_quantity))
+
+# Preprocessing Weather Dataset
+weather_data <- weather_data %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+# Preprocessing Non-weather Dataset
+non_weather_data <- non_weather_data %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+# Aggregate by Day and Hub
+daily_by_hub <- energy_data %>%
+  filter(rate_units == "$/MWH") %>%  # Optional but important filter
+  group_by(
+    transaction_begin_date = as.Date(transaction_begin_date),
+    hub = point_of_delivery_specific_location
+  ) %>%
+  summarize(
+    avg_price = mean(price, na.rm = TRUE),
+    median_price = median(price, na.rm = TRUE),
+    price_sd = sd(price, na.rm = TRUE),
+    avg_price_sd_ratio = price_sd / avg_price,
+
+    avg_quantity = mean(transaction_quantity, na.rm = TRUE),
+    median_quantity = median(transaction_quantity, na.rm = TRUE),
+    quantity_sd = sd(transaction_quantity, na.rm = TRUE),
+    avg_quantity_sd_ratio = quantity_sd / avg_quantity,
+
+    num_transactions = n(),
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Merge Datasets
+inter_data <- weather_data %>% 
+  left_join(non_weather_data, by = "date")
+
+final_data <- daily_by_hub %>%
+  left_join(inter_data, by = c("transaction_begin_date" = "date", "hub" = "hub"))
+```
+
+```{r}
+# Remove Useless Datasets
+rm(list = c('daily_by_hub', 'energy_data', 'inter_data', 'non_weather_data', 'weather_data'))
+```
+
+# Cluster Analysis
+
+```{r}
+# Exclude identifier columns like transaction_begin_date and hub for the clustering algorithm itself.
+clustering_vars_df <- final_data %>%
+  select(
+    avg_price, median_price, price_sd, avg_price_sd_ratio,
+    avg_quantity, median_quantity, quantity_sd, avg_quantity_sd_ratio,
+    num_transactions,
+    precipitation, max_temp, min_temp, avg_temp, avg_wind_speed,
+    max_2min_wind_speed, max_5s_wind_speed, none, abnormally_dry,
+    moderate_drought, severe_drought, extreme_drought, exceptional_drought,
+    gas_price, oil_price, crude_net_import, oil_production,
+    sticky_core_cpi, flexible_core_cpi
+  )
+
+# Remove rows with any NA values from the selected clustering variables.
+# Only one row is removed so no imputation is needed.
+clustering_vars_df <- clustering_vars_df %>%
+  mutate(original_row_id = row_number()) %>% # Assign a row ID BEFORE na.omit
+  na.omit()
+final_data[!complete.cases(final_data), ]
+```
+
+On 2024-01-21 in COB, price_sd and avg_price_sd_ratio are NA. This is very likely caused by the fact that there was only one recorded transaction that began on that day in COB.
+
+```{r}
+# Store the original data before scaling for later interpretation
+original_clustering_data  <- clustering_vars_df
+
+# Scale the data
+scaled_clustering_data <- scale(clustering_vars_df)
+scaled_clustering_data_df <- as.data.frame(scaled_clustering_data)
+
+# Perform PCA, since 28 variables are too many
+pca_result <- prcomp(scaled_clustering_data, scale. = FALSE) # Data is already scaled
+summary(pca_result) # To see variance explained by each component
+
+# Choose how many components to keep
+fviz_eig(pca_result, ncp = 28) # Scree plot to visualize variance explained
+
+# Select the principal components for clustering
+n_components <- 13 # Explains 91.63% cumulative variance with less than half of the components
+pca_data_for_clustering <- as.data.frame(pca_result$x[, 1:n_components])
+```
+
+It seems like picking 13 principle components is the best based on the scree plot and the summary output. Explains 91.63% cumulative variance with 46.4% of total components.
+
+```{r}
+# Determine the optimal number of clusters
+
+# Method 1: Elbow method (WSS - Within Sum of Squares) on PCA data
+fviz_nbclust(pca_data_for_clustering, kmeans, method = "wss", k.max = 10) +
+  labs(subtitle = "Elbow method (on PCA data)") +
+  theme_minimal()
+
+# Method 2: Silhouette method on PCA data
+fviz_nbclust(pca_data_for_clustering, kmeans, method = "silhouette", k.max = 10) +
+  labs(subtitle = "Silhouette method (on PCA data)") +
+  theme_minimal()
+```
+
+It seems like the Elbow method suggests k = 4, as WSS curve starts to flatten out quite significantly after. The Silhouette method suggests k = 2, and the clusters are the most separated when k = 2. But k = 4 doesn't look a lot worse, so I decide the optimal k is 4.
+
+```{r}
+optimal_k <- 4 # As decided from your plots
+
+# Perform K-means clustering on the PCA-transformed data
+set.seed(123) # for reproducibility
+kmeans_result <- kmeans(pca_data_for_clustering, centers = optimal_k, nstart = 25)
+
+# Analyze and Interpret Clusters
+# Add cluster assignments back to the original (pre-scaled, NA-removed) data
+
+# 1. Create a data frame of cluster assignments linked by original_row_id
+cluster_assignments_df <- original_clustering_data %>%
+  select(original_row_id) %>% # Take the original row IDs from the data that was clustered
+  mutate(cluster = as.factor(kmeans_result$cluster)) # Add the cluster label
+
+# 2. Add a temporary original_row_id to the *full* final_data
+final_data_with_id <- final_data %>%
+  mutate(original_row_id = row_number()) # This ensures we map to the exact row in final_data
+
+# 3. Left join the cluster assignments back to the full final_data
+clustered_final_data <- final_data_with_id %>%
+  left_join(cluster_assignments_df, by = "original_row_id") %>%
+  select(-original_row_id) # Remove the temporary ID after joining
+```
+
+```{r}
+optimal_k <- 4 # Change this if you want a different number of clusters
+
+# Perform K-means clustering on the PCA-transformed data
+set.seed(123) # for reproducibility
+kmeans_result <- kmeans(pca_data_for_clustering, centers = optimal_k, nstart = 25)
+
+# Analyze and Interpret Clusters
+
+# Create a data frame of cluster assignments linked by original_row_id
+cluster_assignments_df <- original_clustering_data %>%
+  select(original_row_id) %>% # Take the original row IDs from the data that was clustered
+  mutate(cluster = as.factor(kmeans_result$cluster)) # Add the cluster label
+
+# Add a temporary original_row_id to final_data
+final_data_with_id <- final_data %>%
+  mutate(original_row_id = row_number()) # This ensures we map to the exact row in final_data
+
+# Left join the cluster assignments back to the full final_data
+clustered_final_data <- final_data_with_id %>%
+  left_join(cluster_assignments_df, by = "original_row_id") %>%
+  select(-original_row_id) # Remove the temporary ID after joining
+
+
+# Inspect Cluster Centers (Means of variables per cluster)
+cluster_summary <- clustered_final_data %>%
+  filter(!is.na(cluster)) %>% # Exclude the row that was not clustered
+  group_by(cluster) %>%
+  summarise(
+    across(
+      c(avg_price, median_price, price_sd, avg_price_sd_ratio,
+        avg_quantity, median_quantity, quantity_sd, avg_quantity_sd_ratio,
+        num_transactions,
+        precipitation, max_temp, min_temp, avg_temp, avg_wind_speed,
+        max_2min_wind_speed, max_5s_wind_speed, none, abnormally_dry,
+        moderate_drought, severe_drought, extreme_drought, exceptional_drought,
+        gas_price, oil_price, crude_net_import, oil_production,
+        sticky_core_cpi, flexible_core_cpi),
+      mean, na.rm = TRUE
+    )
+  )
+print(cluster_summary)
+
+# Visualize the clusters
+fviz_cluster(kmeans_result, data = pca_data_for_clustering,
+             geom = "point",
+             ellipse.type = "convex",
+             palette = "jco",
+             ggtheme = theme_minimal(),
+             main = paste0("K-means Clusters (k=", optimal_k, ") on PCA Components"))
+```
+
+Not much valuable insights from the cluster plot. Here is a summary of different categories of the 4 clusters.
+
+Cluster 1:
+
+Prices: Average mean price is around \$38.42/MWH, with an average median of \$35.98/MWH and an average price standard deviation of $17.16. Average mean price and median price are both second high.
+Quantities: Average mean quantity is 150.63 MWH, average median is 41.98 MWH. Lowest average number of transactions at 305.19.
+Temperature: Average mean temperature is 50.43°F.
+Wind Speed: Average mean wind speed is 5.42 MPH.
+Humidity: Lowest average percentage of area in the region without drought at 3.74%. Highest average percentage of area with D0-D4 level of drought. Second lowest average precipitation at 0.029 inch.
+Oil and Gas: Average Gas price at \$1.88/gallon, Oil price at \$61.59/barrel. Lowest average oil production at 9865.50 thousand barrels per day. Highest crude net import at 5865.44 thousand barrels per day.
+Core CPI: Average sticky core cpi is 2.55. Highest average flexible core cpi at 4.73.
+
+Cluster 2:
+
+Prices: Lower average price \$27.69/MWH and median price \$27.34/MWH compared to Cluster 1 and 3. Price standard deviation is \$19.40.
+Quantities: Average mean quantity is 166.86 MWH, average median is 37.67 MWH. Highest average number of transactions at 755.89.
+Temperature: Highest average mean temperature at 65.79°F. Also highest average max temperature at 79.17°F, and highest average min temperature at 52.42°F.
+Wind Speed: Highest average mean wind speed at 11.01 MPH and highest average 2-min/5-s wind speeds at 25.28 MPH and 32.66 MPH respectively.
+Humidity: Average percentage of area in the region without drought is 36.47%. Lower average percentage of area with D0-D4 level of drought than cluster 3. Lowest average precipitation at 0.017 inch.
+Oil and Gas: Average gas price at \$1.89/gallon, Oil price at \$60.97/barrel.
+Core CPI: Average sticky core cpi is 2.62. Average flexible core cpi is 2.77.
+
+Cluster 3:
+
+Prices: Highest average price \$85.74/MWH and median price \$82.56/MWH. Highest price standard deviation \$60.66.
+Quantities: Average mean quantity is 158.25 MWH, highest average median at 49.46 MWH. Average number of transactions is 535.61.
+Temperature: Average mean temperature is 48.08°F.
+Wind Speed: Average mean wind speed is 5.58 MPH.
+Humidity: Average percentage of area in the region without drought is 35.72%. Second highest average precipitation at 0.041 inch.
+Oil and Gas: Highest average gas price at \$2.74/gallon and highest oil price at \$84.83/barrel. Highest average oil production at 12456.68 thousand barrels per day. Lowest crude net import at 2539.619 thousand barrels per day.
+Core CPI: Highest average sticky core cpi at 5.52. Average flexible core cpi is 1.86.
+
+Cluster 4:
+
+Prices: Lower average price \$28.69/MWH and median price \$28.08/MWH compared to Cluster 1 and 3. Price standard deviation is \$17.29.
+Quantities: Highest average mean quantity at 176.85 MWH, average median is 39.95 MWH. Average number of transactions is 553.44.
+Temperature: Lowest average mean temperature at 43.10°F. Also lowest average max temperature at 54.61°F, and lowest average min temperature at 31.59°F.
+Wind Speed: Lowest average mean wind speed at 4.29 MPH and lowest average 2-min/5-s wind speeds at 14.59 MPH and 18.56 MPH respectively.
+Humidity: Highest average percentage of area in the region without drought at 58.98%. Lowest average percentage of area with D0-D4 level of drought. Highest average precipitation at 0.046 inch.
+Oil and Gas: Lowest average gas price at \$1.63/gallon, highest Oil price at \$53.35/barrel.
+Core CPI: Lowest average sticky core cpi at 2.19. Lowest average flexible core cpi at -0.04.
+
+```{r}
+# Explore specific variable distributions across clusters using boxplots
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = avg_price, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Average Price Distribution by Cluster",
+       x = "Cluster",
+       y = "Average Price ($/MWH)") +
+  theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = avg_quantity, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Average Quantity Distribution by Cluster",
+       x = "Cluster",
+       y = "Average Quantity (MWH)") +
+  theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = num_transactions, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Number of Transactions Distribution by Cluster",
+       x = "Cluster",
+       y = "Number of Transactions per Day") +
+  theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = avg_temp, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Average Temperature Distribution by Cluster",
+       x = "Cluster",
+       y = "Average Temperature (Fahrenheit)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = avg_wind_speed, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Average Wind Speed Distribution by Cluster",
+       x = "Cluster",
+       y = "Average Wind Speed (MPH)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = precipitation, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Average Precipitation Distribution by Cluster",
+       x = "Cluster",
+       y = "Average Precipitation (Inch)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = none, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Percentage of area in the region without drought Distribution by Cluster",
+       x = "Cluster",
+       y = "Percentage of area in the region without drought") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = oil_price, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Oil Price Distribution by Cluster",
+       x = "Cluster",
+       y = "Oil Price ($/Barrel)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = gas_price, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Gas Price Distribution by Cluster",
+       x = "Cluster",
+       y = "Gas Price ($/Gallon)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = crude_net_import, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Net Import of Crude Oil Distribution by Cluster",
+       x = "Cluster",
+       y = "Crude Net Import (Thousand Barrels per Day)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = oil_production, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Production of Crude Oil Distribution by Cluster",
+       x = "Cluster",
+       y = "Oil Production (Thousand Barrels per Day)") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = sticky_core_cpi, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Sticky Core CPI Distribution by Cluster",
+       x = "Cluster",
+       y = "Sticky Core CPI") +
+       theme_minimal()
+
+ggplot(clustered_final_data %>% filter(!is.na(cluster)), # Filter out NA cluster
+       aes(x = cluster, y = flexible_core_cpi, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Flexible Core CPI Distribution by Cluster",
+       x = "Cluster",
+       y = "Flexible Core CPI") +
+       theme_minimal()
+
+# Analyze hub distribution within clusters
+hub_cluster_distribution <- clustered_final_data %>%
+  filter(!is.na(cluster)) %>% # Exclude the row that couldn't be clustered
+  group_by(cluster, hub) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = hub, values_from = count, values_fill = 0)
+print(hub_cluster_distribution)
+```
+
+# Conclusion
+
+We got four clusters from our cluster analysis, each has some characteristics. Everything below are averages and relative.
+
+Cluster 1: Medium transaction price. Medium low transaction quantity. Very low number of transactions. Medium temperature. Medium Wind. Very dry. Slightly rainy. Mid-priced oil and gas. High crude net import. Low oil production. Normal inflation for sticky items. High inflation for flexible items. Dominated by COB (91%).
+Cluster 2: Low transaction price. Medium transaction quantity. Very high number of transactions. Hot. Windy. Medium Humidity. Not rainy. Mid-priced oil and gas. High crude net import. Medium oil production. Normal inflation for sticky items. Normal inflation for flexible items. Dominated by Mid-C (82%).
+Cluster 3: Very high transaction price. Medium transaction quantity. Medium number of transactions. Medium temperature. Medium Wind. Medium Humidity. Rainy. Expensive oil and gas. Very low crude net import. High oil production. High inflation for sticky items. Slightly low inflation for flexible items. Slightly more COB than Mid-C (COB 51%).
+Cluster 4: Low transaction price. Medium high transaction quantity. Medium number of transactions. Cold. Mild wind. Humid. Rainy. Cheap oil and gas. High crude net import. Medium oil production. Normal inflation sticky items. Deflation for flexible items. More Mid-C than COB (Mid-C 57%).
