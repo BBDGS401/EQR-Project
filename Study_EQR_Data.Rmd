@@ -885,7 +885,7 @@ ggplot(processed_data, aes(x = as.factor(year(transaction_begin_date)), y = tran
 
 rm(processed_data)
 ```
-
+mi
 ```{r echo=FALSE}
 processed_data <- energy_daily_data %>%
   mutate(transaction_begin_year = year(transaction_begin_date)) %>%  # Extract year from transaction_begin_date
@@ -2353,7 +2353,7 @@ https://www.eia.gov/todayinenergy/detail.php?id=38932
 In the articles, the authors attribute the price spikes due to pipeline and storage maintenance, as well as low temperature caused by polar vortex. The pipeline under maintenance carried gas from Canada into the Pacific Northwest through Sumas. The temperature at that time was averaging 36 F, lower than the historical average by 10 F.
 
 ```{r echo=FALSE}
-# Filter for January transactions and sort by price in descending order, top 50 price
+# Filter for March transactions and sort by price in descending order, top 50 price
 energy_daily_data %>%
   filter(month(transaction_begin_date) == 3) %>%
   arrange(desc(price)) %>%
@@ -2430,7 +2430,7 @@ In the Caiso report, it mentioned that the experienced temperature was 3 F highe
 Again, let's list the top 100 highest price transactions in August to explore more.
 
 ```{r echo=FALSE}
-# Filter for January transactions and sort by price in descending order, top 50 price
+# Filter for August transactions and sort by price in descending order, top 50 price
 energy_daily_data %>%
   filter(month(transaction_begin_date) == 8) %>%
   arrange(desc(price)) %>%
@@ -2504,7 +2504,7 @@ https://www.eia.gov/todayinenergy/detail.php?id=55139
 From eia, it mentioned that there was a heat wave in the western US in early September. From Energy Institute at HAAS, we know that electricity demand was pushed to an all time high. Expensive natural gas-fired generation increased at that time. If we combine these facts, a price surge is a logical response.
 
 ```{r echo=FALSE}
-# Filter for January transactions and sort by price in descending order, top 50 price
+# Filter for September transactions and sort by price in descending order, top 50 price
 energy_daily_data %>%
   filter(month(transaction_begin_date) == 9) %>%
   arrange(desc(price)) %>%
@@ -2578,7 +2578,7 @@ https://en.wikipedia.org/wiki/December_2022_North_American_winter_storm
 It seems like the two peaks are actually from the same year, 2022. There was a winter storm in December 2022. Extreme winter weather on December 23-25 increased natural gas and electricity demand acorss the US, and also restricted the production of natural gas. From the caiso document, it also stated that low gas storage could be a reason. Earlier heatwaves in the summer (the one I discussed in September 2022) used up lots of natural gas in storage inventories. Another factor is the lower hydro generation in the West.
 
 ```{r echo=FALSE}
-# Filter for January transactions and sort by price in descending order, top 50 price
+# Filter for December transactions and sort by price in descending order, top 50 price
 energy_daily_data %>%
   filter(month(transaction_begin_date) == 12) %>%
   arrange(desc(price)) %>%
@@ -4033,7 +4033,7 @@ ICE_data_cob$Price_Date <- ymd(mdy(ICE_data_cob$Price_Date))
 
 I realized that there are no price on some dates. My approach so solve this problem is the copy the data from the previous date.
 
-````{r echo=FALSE}
+```{r echo=FALSE}
 library(timeDate)
 library(zoo)
 
@@ -4424,10 +4424,219 @@ rm(merged_data_cob_202324)
 
 Now we can see clearly that the two prices didn't match all the time. There are times where ICE index price or mean energy transaction price shot up very sharply, but the other price didn't. It could be due to some outlier transactions, so one way to look deeper into this issue is to use median energy transaction price in COB instead.
 
+## Median Energy Price and ICE Daily Index Analysis
+
+```{r echo=FALSE}
+# Step 1: Extract 'YYYY/MM/DD HH' from 'transaction_begin_date' and calculate daily mean price
+median_energy_price_midc <- energy_hourly_data %>%
+  filter(point_of_delivery_specific_location == "MID-COLUMBIA (MID-C)") %>% 
+  mutate(transaction_begin_hour = format(transaction_begin_date, "%Y-%m-%d %H")) %>%
+  group_by(transaction_begin_hour) %>%
+  summarise(mean_price = mean(price, na.rm = TRUE),
+            median_price = median(price, na.rm = TRUE))
+
+median_energy_price_cob <- energy_hourly_data %>%
+  filter(point_of_delivery_specific_location == "COB") %>% 
+  mutate(transaction_begin_hour = format(transaction_begin_date, "%Y-%m-%d %H")) %>%
+  group_by(transaction_begin_hour) %>%
+  summarise(mean_price = mean(price, na.rm = TRUE),
+            median_price = median(price, na.rm = TRUE))
+
+# Step 2: Merge ICE_data_midc with daily mean prices from energy_hourly_transaction on Price_Date
+merged_data_midc <- merge(ICE_data_midc, median_energy_price_midc, by.x = "Price_Date", by.y = "transaction_begin_hour") %>%
+  filter(!(is.na(Price_Date)))
+merged_data_cob <- merge(ICE_data_cob, median_energy_price_cob, by.x = "Price_Date", by.y = "transaction_begin_hour") %>%
+  filter(!(is.na(Price_Date)))
+```
+
+```{r}
+rm(median_energy_price_midc, median_energy_price_cob)
+
+# Convert Price_Date to POSIXct for both merged datasets
+merged_data_midc$Price_Date <- as.POSIXct(merged_data_midc$Price_Date, format = "%Y-%m-%d %H")
+merged_data_cob$Price_Date <- as.POSIXct(merged_data_cob$Price_Date, format = "%Y-%m-%d %H")
+
+# Step 3: Plot Scatter Plot
+
+# Fit a linear model for Mid-C data
+lm_midc <- lm(median_price ~ Price, data = merged_data_midc)
+
+# Extract the R-squared value
+r_squared_midc <- summary(lm_midc)$r.squared
+print(paste("R-squared value for Mid-C: ", r_squared_midc))
+
+# Scatter plot with R-squared value in the title
+ggplot(merged_data_midc, aes(x = Price, y = median_price)) +
+  geom_point() +  # Dots
+  geom_smooth(method = "lm", se = FALSE, color = 'seagreen') +  # Best Fit Line
+  labs(x = "ICE Price", y = "Median Energy Transaction Price", 
+       title = "ICE Index vs EQR Hourly Median Energy Price in Mid-C") +
+  theme_minimal()
+
+# Fit a linear model for COB data
+lm_cob <- lm(median_price ~ Price, data = merged_data_cob)
+
+# Extract the R-squared value
+r_squared_cob <- summary(lm_cob)$r.squared
+print(paste("R-squared value for COB: ", r_squared_cob))
+
+# Scatter plot with R-squared value in the title
+ggplot(merged_data_cob, aes(x = Price, y = median_price)) +
+  geom_point() +  # Dots
+  geom_smooth(method = "lm", se = FALSE, color = 'seagreen') +  # Best Fit Line
+  labs(x = "ICE Price", y = "Median Energy Transaction Price", 
+       title = "ICE Index vs EQR Hourly Median Energy Price in COB") +
+  theme_minimal()
+
+ggplot(merged_data_midc, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "ICE Index vs EQR Hourly Median Energy Price in Mid-C") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggplot(merged_data_cob, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "ICE Index vs EQR Hourly Median Energy Price in COB") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(lm_cob, lm_midc, r_squared_cob, r_squared_midc)
+```
+
+From the scatter plot, we can clearly see that median energy transaction price has a weak correlation with ICE Index Price, comparing to mean energy transaction price. Regardless, I will still show the zoom in version of line charts for extra information.
+
+```{r echo=FALSE}
+merged_data_midc_201819 <- merged_data_midc %>% filter(year(Price_Date) %in% c(2018, 2019))
+
+ggplot(merged_data_midc_201819, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in Mid-C") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_midc_201819)
+
+merged_data_midc_2020 <- merged_data_midc %>% filter(year(Price_Date) == 2020)
+
+ggplot(merged_data_midc_2020, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in Mid-C") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_midc_2020)
+
+merged_data_midc_2021 <- merged_data_midc %>% filter(year(Price_Date) == 2021)
+
+ggplot(merged_data_midc_2021, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in Mid-C") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_midc_2021)
+
+merged_data_midc_2022 <- merged_data_midc %>% filter(year(Price_Date) == 2022)
+
+ggplot(merged_data_midc_2022, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in Mid-C") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_midc_2022)
+
+merged_data_midc_202324<- merged_data_midc %>% filter(year(Price_Date) %in% c(2023, 2024))
+
+ggplot(merged_data_midc_202324, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in Mid-C") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_midc_202324)
+```
+
+```{r echo=FALSE}
+merged_data_cob_201819 <- merged_data_cob %>% filter(year(Price_Date) %in% c(2018, 2019))
+
+ggplot(merged_data_cob_201819, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in COB") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_cob_201819)
+
+merged_data_cob_2020 <- merged_data_cob %>% filter(year(Price_Date) == 2020)
+
+ggplot(merged_data_cob_2020, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in COB") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_cob_2020)
+
+merged_data_cob_2021 <- merged_data_cob %>% filter(year(Price_Date) == 2021)
+
+ggplot(merged_data_cob_2021, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in COB") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_cob_2021)
+
+merged_data_cob_2022 <- merged_data_cob %>% filter(year(Price_Date) == 2022)
+
+ggplot(merged_data_cob_2022, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in COB") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_cob_2022)
+
+merged_data_cob_202324<- merged_data_cob %>% filter(year(Price_Date) %in% c(2023, 2024))
+
+ggplot(merged_data_cob_202324, aes(x = Price_Date)) +
+  geom_line(aes(y = median_price, color = "Median Energy Transaction Price")) +  # Line for mean energy price
+  geom_line(aes(y = Price, color = "ICE Index Price")) +  # Line for ICE index price
+  labs(x = "Date/Time", y = "Price", title = "Hourly Median Energy Transaction Price vs ICE Index Price in COB") +
+  scale_color_manual("", values = c("Median Energy Transaction Price" = "cadetblue", "ICE Index Price" = "darkgoldenrod")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+rm(merged_data_cob_202324)
+```
+
 Clean all variables that we won't use before moving the other analysis.
 
 ```{r echo=FALSE}
-rm(merged_data_cob, merged_data_midc, energy_hourly_data)
+rm(ICE_data_cob, ICE_data_midc, merged_data_cob, merged_data_midc, energy_hourly_data)
 ```
 
 # Energy and Gas Price
@@ -4528,14 +4737,6 @@ It seems like gas price only has a weak linear correlation with the actual mean 
 rm(lm_mean, lm_median, merged_data, processed_data, gas_price_data)
 ```
 
-```{r echo=FALSE}
-energy_no_breakdown_data <- data.table::fread("Final_Data_Files/final_energy_transactions_no_breakdown.csv")
-```
-
-```{r echo=FALSE}
-energy_no_breakdown_data %>% filter(grepl('powerex', seller_company_name, ignore.case = TRUE))
-```
-
 
 ()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()
 Priortize Energy product, after that we do ancillary.
@@ -4607,3 +4808,4 @@ total_transaction_charge: $\text{transaction_quantity} \times \text{price} + \te
 day_duration: $\text{transaction_end_date} - \text{transaction_begin_date}$. Round up to the nearest integer. This is the original duration (in days) of the transaction. If a transaction_unique_id appears 10 times, day_duration is 10.
 
 hour_duration: $\text{transaction_end_date} - \text{transaction_begin_date}$. Round up to the nearest integer. This is the original duration (in hours) of the transaction. If a transaction_unique_id appears 10 times, hour_duration is 10. It has taken peak and off-peak hours into account so that hourly analysis could be accurate.
+
